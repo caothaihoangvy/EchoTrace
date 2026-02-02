@@ -4,6 +4,30 @@ import { Command } from 'commander';
 import { loadConfig, saveConfig, DEFAULT_CONFIG } from './config.js';
 import { loadIdentity, normalizePubkey } from './keys.js';
 import { openDb, insertEventIfMissing, addPending, listDuePending, bumpPending, removePending } from './db.js';
+
+async function syncPendingOnce(cfg: any, db: any, limit = 50) {
+  const due = listDuePending(db, limit);
+  if (!due.length) return { attempted: 0, published: 0, stillPending: 0 };
+
+  let published = 0;
+  for (const item of due) {
+    try {
+      const ev = JSON.parse(item.event_json);
+      const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
+      const ok = results.some((r: any) => r.ok);
+      if (ok) {
+        removePending(db, item.id);
+        published++;
+      } else {
+        bumpPending(db, item.id, results.map((r: any) => `${r.relay}: ${r.error ?? 'fail'}`).join('; '));
+      }
+    } catch (e: any) {
+      bumpPending(db, item.id, String(e?.message ?? e));
+    }
+  }
+
+  return { attempted: due.length, published, stillPending: due.length - published };
+}
 import {
   buildMetadataEvent,
   buildPostEvent,
@@ -319,32 +343,13 @@ program
   .action(async () => {
     const cfg = loadConfig();
     const db = openDb();
-    const due = listDuePending(db, 50);
 
-    if (!due.length) {
+    const res = await syncPendingOnce(cfg, db, 50);
+    if (!res.attempted) {
       console.log('No pending publishes due.');
       return;
     }
-
-    console.log(`Retrying ${due.length} pending events...`);
-
-    for (const item of due) {
-      try {
-        const ev = JSON.parse(item.event_json);
-        const results = await publishToRelays(cfg.relays, ev);
-        const ok = results.some((r) => r.ok);
-        if (ok) {
-          removePending(db, item.id);
-          console.log('OK published:', item.id);
-        } else {
-          bumpPending(db, item.id, results.map((r) => `${r.relay}: ${r.error ?? 'fail'}`).join('; '));
-          console.log('Still failing:', item.id);
-        }
-      } catch (e: any) {
-        bumpPending(db, item.id, String(e?.message ?? e));
-        console.log('Error parsing/publishing:', item.id);
-      }
-    }
+    console.log(`Retried ${res.attempted}. Published ${res.published}. Still pending ${res.stillPending}.`);
   });
 
 program
@@ -353,6 +358,71 @@ program
   .action(() => {
     const cfg = loadConfig();
     console.log(JSON.stringify(cfg, null, 2));
+  });
+
+program
+  .command('watch')
+  .description('Long-running mode: subscribe feed + periodically sync pending publishes')
+  .option('--sync-every <seconds>', 'sync interval seconds', '60')
+  .option('--limit <n>', 'historical limit for initial subscribe', '50')
+  .action(async (opts) => {
+    const cfg = loadConfig();
+    const db = openDb();
+
+    if (!cfg.follows.length) {
+      console.error('No follows configured. Use: echotrace follow add <npub|pubkeyHex>');
+      process.exitCode = 1;
+      return;
+    }
+
+    const syncEverySec = Math.max(5, Number(opts.syncEvery ?? 60));
+    const limit = Number(opts.limit ?? 50);
+
+    console.log('watch: starting');
+    console.log('Relays:', cfg.relays.join(', '));
+    console.log('Following:', cfg.follows.map((x) => short(x)).join(', '));
+    console.log('Sync every:', syncEverySec, 'sec');
+
+    let stopped = false;
+    const stop = () => { stopped = true; };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+
+    // Subscribe
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 7; // 7 days
+    const filters = [{ kinds: [1, 7], authors: cfg.follows, limit, since }];
+
+    const sub = subscribeFeed(cfg.relays, filters as any, (ev, relay) => {
+      insertEventIfMissing(db, {
+        id: ev.id,
+        kind: ev.kind,
+        pubkey: ev.pubkey,
+        created_at: ev.created_at,
+        content: ev.content,
+        tags_json: JSON.stringify(ev.tags),
+        sig: ev.sig,
+        raw_json: JSON.stringify(ev),
+        received_at: Math.floor(Date.now() / 1000)
+      });
+      console.log(renderEvent(ev), `(via ${relay})`);
+    });
+
+    // Periodic sync loop
+    while (!stopped) {
+      try {
+        const res = await syncPendingOnce(cfg, db, 50);
+        if (res.attempted) {
+          console.log(`sync: attempted=${res.attempted} published=${res.published} stillPending=${res.stillPending}`);
+        }
+      } catch (e: any) {
+        console.error('sync loop error:', String(e?.message ?? e));
+      }
+
+      await new Promise((r) => setTimeout(r, syncEverySec * 1000));
+    }
+
+    try { sub.close(); } catch {}
+    console.log('watch: stopped');
   });
 
 program
