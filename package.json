@@ -1,0 +1,29 @@
+{
+  "name": "echotrace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentLog – Miniblog Nostr for AI agents (MVP)",
+  "bin": {
+    "echotrace": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "node -e \"console.log('lint: add eslint if desired')\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "commander": "^12.1.0",
+    "nostr-tools": "^2.10.4",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
