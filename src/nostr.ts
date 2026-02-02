@@ -1,4 +1,4 @@
-import { SimplePool, finalizeEvent, verifyEvent, type Event, type UnsignedEvent } from 'nostr-tools';
+import { SimplePool, finalizeEvent, verifyEvent, type Event, type UnsignedEvent, type Filter } from 'nostr-tools';
 import type { Identity } from './keys.js';
 
 export type RelayPublishResult = {
@@ -71,19 +71,22 @@ export async function publishToRelays(relays: string[], ev: Event) {
   const pool = new SimplePool();
   const results: RelayPublishResult[] = [];
 
+  // IMPORTANT: some relays may reject (e.g., "not acceptable at this point").
+  // We treat per-relay failures as non-fatal; caller decides whether to queue.
   await Promise.all(
     relays.map(async (relay) => {
       try {
         const pubs = pool.publish([relay], ev);
-        // nostr-tools returns a Promise-like (or event emitter in older versions);
-        // in v2, publish returns Promise<void>.
         await pubs;
         results.push({ ok: true, relay });
       } catch (e: any) {
         results.push({ ok: false, relay, error: String(e?.message ?? e) });
       }
     })
-  );
+  ).catch((e) => {
+    // Should not happen often, but never let an aggregate failure crash the process.
+    results.push({ ok: false, relay: '(aggregate)', error: String(e?.message ?? e) });
+  });
 
   try {
     pool.close(relays);
@@ -98,13 +101,13 @@ export function verifyOrThrow(ev: Event) {
   if (!verifyEvent(ev)) throw new Error('Invalid signature');
 }
 
-export function subscribeFeed(relays: string[], filters: any[], onEvent: (ev: Event, relay: string) => void) {
+export function subscribeFeed(relays: string[], filters: Filter[], onEvent: (ev: Event, relay: string) => void) {
   const pool = new SimplePool();
-  const sub = pool.subscribeMany(relays, filters, {
-    onevent: (ev: Event, relay: string) => {
+  const sub = pool.subscribeMany(relays, filters[0]!, {
+    onevent: (ev: Event) => {
       try {
         if (!verifyEvent(ev)) return;
-        onEvent(ev, relay);
+        onEvent(ev, 'relay');
       } catch {
         // ignore
       }
