@@ -1,4 +1,4 @@
-import { SimplePool, finalizeEvent, verifyEvent, type Event, type UnsignedEvent, type Filter } from 'nostr-tools';
+import { SimplePool, finalizeEvent, verifyEvent, nip44, type Event, type UnsignedEvent, type Filter } from 'nostr-tools';
 import type { Identity } from './keys.js';
 
 export type RelayPublishResult = {
@@ -39,6 +39,21 @@ export function buildPostEvent(identity: Identity, content: string, tags: string
     pubkey: identity.pk
   };
   return finalizeEvent(unsigned, identity.sk);
+}
+
+export function buildEncryptedPostEventNip44(identity: Identity, toPubkeyHex: string, plaintext: string) {
+  const conversationKey = nip44.getConversationKey(identity.sk, toPubkeyHex);
+  const ciphertext = nip44.encrypt(plaintext, conversationKey);
+  const tags: string[][] = [
+    ['p', toPubkeyHex],
+    ['echotrace', 'e2ee', 'nip44']
+  ];
+  return buildPostEvent(identity, ciphertext, tags);
+}
+
+export function decryptNip44(identity: Identity, otherPubkeyHex: string, ciphertext: string) {
+  const conversationKey = nip44.getConversationKey(identity.sk, otherPubkeyHex);
+  return nip44.decrypt(ciphertext, conversationKey);
 }
 
 export function buildReactionEvent(identity: Identity, targetEventId: string, targetPubkey: string, reaction: '+' | '-') {
@@ -102,9 +117,14 @@ export async function publishToRelays(relays: string[], ev: Event, opts?: { time
   await Promise.all(
     safeRelays.map(async (relay) => {
       try {
-        const pubs = pool.publish([relay], ev);
-        await withTimeout(Promise.resolve(pubs as any), timeoutMs, `publish ${relay}`);
-        results.push({ ok: true, relay });
+        const pubs = pool.publish([relay], ev) as unknown as Promise<unknown>[];
+        const settled = await withTimeout(Promise.allSettled(pubs), timeoutMs, `publish ${relay}`);
+        const rej = settled.find((s) => s.status === 'rejected') as PromiseRejectedResult | undefined;
+        if (rej) {
+          results.push({ ok: false, relay, error: String((rej.reason as any)?.message ?? rej.reason) });
+        } else {
+          results.push({ ok: true, relay });
+        }
       } catch (e: any) {
         results.push({ ok: false, relay, error: String(e?.message ?? e) });
       }

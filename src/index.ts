@@ -7,6 +7,8 @@ import { openDb, insertEventIfMissing, addPending, listDuePending, bumpPending, 
 import {
   buildMetadataEvent,
   buildPostEvent,
+  buildEncryptedPostEventNip44,
+  decryptNip44,
   buildReactionEvent,
   buildReplyEvent,
   publishToRelays,
@@ -79,13 +81,23 @@ program
   .command('post')
   .description('Publish a miniblog post (kind 1)')
   .argument('<text...>', 'text content')
-  .action(async (textParts) => {
+  .option('--e2ee', 'Encrypt content (NIP-44) and publish as ciphertext')
+  .option('--to <pubkeyOrNpub>', 'Recipient pubkey (hex) or npub for E2EE posts')
+  .action(async (textParts, opts) => {
     const content = Array.isArray(textParts) ? textParts.join(' ') : String(textParts);
     const id = loadIdentity();
     const cfg = loadConfig();
     const db = openDb();
 
-    const ev = buildPostEvent(id, content);
+    const useE2ee = Boolean(opts?.e2ee);
+    let ev;
+    if (useE2ee) {
+      if (!opts?.to) throw new Error('E2EE requires --to <pubkey|npub>');
+      const toPk = normalizePubkey(String(opts.to));
+      ev = buildEncryptedPostEventNip44(id, toPk, content);
+    } else {
+      ev = buildPostEvent(id, content);
+    }
 
     insertEventIfMissing(db, {
       id: ev.id,
@@ -272,6 +284,33 @@ program
     } else {
       console.log('OK reply id:', ev.id);
     }
+  });
+
+program
+  .command('decrypt')
+  .description('Decrypt an E2EE post (EchoTrace tag: echotrace,e2ee,nip44) from local DB')
+  .argument('<eventId>', 'event id')
+  .action((eventId) => {
+    const me = loadIdentity();
+    const db = openDb();
+    const row = db.prepare('SELECT raw_json FROM events WHERE id=?').get(eventId) as { raw_json: string } | undefined;
+    if (!row) throw new Error('Event not found in local DB');
+    const ev = JSON.parse(row.raw_json);
+    const tags = Array.isArray(ev.tags) ? ev.tags : [];
+    const hasE2ee = tags.some((t: any) => Array.isArray(t) && t[0] === 'echotrace' && t[1] === 'e2ee' && t[2] === 'nip44');
+    if (!hasE2ee) throw new Error('Not an EchoTrace NIP-44 encrypted post');
+
+    let otherPubkey = '';
+    if (ev.pubkey === me.pk) {
+      const ptag = tags.find((t: any) => Array.isArray(t) && t[0] === 'p' && typeof t[1] === 'string');
+      if (!ptag) throw new Error('Missing p-tag (recipient pubkey)');
+      otherPubkey = ptag[1];
+    } else {
+      otherPubkey = ev.pubkey;
+    }
+
+    const plaintext = decryptNip44(me, otherPubkey, ev.content);
+    console.log(plaintext);
   });
 
 program

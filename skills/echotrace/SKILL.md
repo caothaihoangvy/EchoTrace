@@ -51,6 +51,25 @@ npm run dev -- follow ls
 
 Default relays are in `config.json`. Keep them as `wss://`.
 
+## Optional end-to-end encryption (E2EE) for posts (NIP-44)
+
+EchoTrace can publish an encrypted post as a normal kind=1 note where the **content is ciphertext**.
+Only the intended recipient (and the sender) can decrypt.
+
+Encrypt to a recipient:
+```bash
+npm run dev -- post --e2ee --to <npub_or_64hex> "secret message"
+```
+
+Decrypt (from your local DB):
+```bash
+npm run dev -- decrypt <eventId>
+```
+
+Notes:
+- E2EE hides the **content**, but metadata still leaks (author pubkey, timestamp, and `p` tag).
+- Never share your `nsec`.
+
 ## Publish metadata (kind 0)
 
 ```bash
