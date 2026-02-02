@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import { loadConfig, saveConfig, DEFAULT_CONFIG } from './config.js';
 import { loadIdentity, normalizePubkey } from './keys.js';
-import { openDb, insertEventIfMissing, addPending, listDuePending, bumpPending, removePending } from './db.js';
+import { openDb, insertEventIfMissing, enforceCacheLimit, dbCounts, addPending, listDuePending, bumpPending, removePending } from './db.js';
 
 async function syncPendingOnce(cfg: any, db: any, limit = 50) {
   const due = listDuePending(db, limit);
@@ -90,6 +90,7 @@ program
       raw_json: JSON.stringify(ev),
       received_at: Math.floor(Date.now() / 1000)
     });
+    enforceCacheLimit(db, cfg.cache_limit);
 
     const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((r) => r.ok);
@@ -134,6 +135,7 @@ program
       raw_json: JSON.stringify(ev),
       received_at: Math.floor(Date.now() / 1000)
     });
+    enforceCacheLimit(db, cfg.cache_limit);
 
     const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((r) => r.ok);
@@ -206,6 +208,7 @@ program
         raw_json: JSON.stringify(ev),
         received_at: Math.floor(Date.now() / 1000)
       });
+      enforceCacheLimit(db, cfg.cache_limit);
       console.log(renderEvent(ev), `(via ${relay})`);
     });
 
@@ -254,8 +257,9 @@ program
       raw_json: JSON.stringify(ev),
       received_at: Math.floor(Date.now() / 1000)
     });
+    enforceCacheLimit(db, cfg.cache_limit);
 
-    const results = await publishToRelays(cfg.relays, ev);
+    const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((x) => x.ok);
     if (!ok) {
       addPending(db, ev.id, JSON.stringify(ev), results.map((x) => `${x.relay}: ${x.error ?? 'fail'}`).join('; '));
@@ -299,8 +303,9 @@ program
       raw_json: JSON.stringify(ev),
       received_at: Math.floor(Date.now() / 1000)
     });
+    enforceCacheLimit(db, cfg.cache_limit);
 
-    const results = await publishToRelays(cfg.relays, ev);
+    const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((x) => x.ok);
     if (!ok) {
       addPending(db, ev.id, JSON.stringify(ev), results.map((x) => `${x.relay}: ${x.error ?? 'fail'}`).join('; '));
@@ -358,6 +363,24 @@ program
   .action(() => {
     const cfg = loadConfig();
     console.log(JSON.stringify(cfg, null, 2));
+  });
+
+program
+  .command('status')
+  .description('Show local health/status (events cached, pending queue, relays, follows)')
+  .action(() => {
+    const cfg = loadConfig();
+    const me = loadIdentity();
+    const db = openDb();
+    const counts = dbCounts(db);
+
+    console.log(JSON.stringify({
+      agent: { npub: me.npub, pubkey: me.pk },
+      relays: cfg.relays,
+      follows: cfg.follows,
+      cache_limit: cfg.cache_limit,
+      db: counts
+    }, null, 2));
   });
 
 program

@@ -71,6 +71,32 @@ export function insertEventIfMissing(db: Database.Database, row: DbEventRow) {
   stmt.run(row);
 }
 
+export function enforceCacheLimit(db: Database.Database, cacheLimit: number) {
+  const limit = Number.isFinite(cacheLimit) ? Math.max(0, Math.floor(cacheLimit)) : 0;
+  if (!limit) return;
+
+  const row = db.prepare('SELECT COUNT(1) AS c FROM events').get() as { c: number };
+  const count = row?.c ?? 0;
+  if (count <= limit) return;
+
+  const toDelete = count - limit;
+  // Delete oldest by created_at (then received_at) to keep DB bounded.
+  db.prepare(`
+    DELETE FROM events
+    WHERE id IN (
+      SELECT id FROM events
+      ORDER BY created_at ASC, received_at ASC
+      LIMIT @n
+    )
+  `).run({ n: toDelete });
+}
+
+export function dbCounts(db: Database.Database) {
+  const events = db.prepare('SELECT COUNT(1) AS c FROM events').get() as { c: number };
+  const pending = db.prepare('SELECT COUNT(1) AS c FROM pending_publish').get() as { c: number };
+  return { events: events?.c ?? 0, pending: pending?.c ?? 0 };
+}
+
 export function addPending(db: Database.Database, id: string, event_json: string, err?: string) {
   const now = Math.floor(Date.now() / 1000);
   const stmt = db.prepare(`
