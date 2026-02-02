@@ -65,7 +65,7 @@ program
       received_at: Math.floor(Date.now() / 1000)
     });
 
-    const results = await publishToRelays(cfg.relays, ev);
+    const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((r) => r.ok);
     if (!ok) {
       addPending(db, ev.id, JSON.stringify(ev), results.map((r) => `${r.relay}: ${r.error ?? 'fail'}`).join('; '));
@@ -99,7 +99,7 @@ program
       received_at: Math.floor(Date.now() / 1000)
     });
 
-    const results = await publishToRelays(cfg.relays, ev);
+    const results = await publishToRelays(cfg.relays, ev, { timeoutMs: 8000 });
     const ok = results.some((r) => r.ok);
     if (!ok) {
       addPending(db, ev.id, JSON.stringify(ev), results.map((r) => `${r.relay}: ${r.error ?? 'fail'}`).join('; '));

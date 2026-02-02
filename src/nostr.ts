@@ -67,29 +67,55 @@ export function buildReplyEvent(identity: Identity, rootEventId: string, rootPub
   return buildPostEvent(identity, content, tags);
 }
 
-export async function publishToRelays(relays: string[], ev: Event) {
+function isSafeRelayUrl(url: string) {
+  // Keep it strict by default: Nostr relays should be wss://.
+  // Allow ws:// only if the operator explicitly configures it (still risky).
+  return /^wss:\/\//i.test(url) || /^ws:\/\//i.test(url);
+}
+
+function normalizeRelayList(relays: string[]) {
+  const cleaned = relays.map((r) => r.trim()).filter(Boolean);
+  return Array.from(new Set(cleaned)).filter(isSafeRelayUrl);
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label}: timeout after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
+export async function publishToRelays(relays: string[], ev: Event, opts?: { timeoutMs?: number }) {
   const pool = new SimplePool();
   const results: RelayPublishResult[] = [];
 
+  const timeoutMs = Math.max(1000, opts?.timeoutMs ?? 8000);
+  const safeRelays = normalizeRelayList(relays);
+
   // IMPORTANT: some relays may reject (e.g., "not acceptable at this point").
-  // We treat per-relay failures as non-fatal; caller decides whether to queue.
+  // Treat per-relay failures as non-fatal; caller decides whether to queue.
   await Promise.all(
-    relays.map(async (relay) => {
+    safeRelays.map(async (relay) => {
       try {
         const pubs = pool.publish([relay], ev);
-        await pubs;
+        await withTimeout(Promise.resolve(pubs as any), timeoutMs, `publish ${relay}`);
         results.push({ ok: true, relay });
       } catch (e: any) {
         results.push({ ok: false, relay, error: String(e?.message ?? e) });
       }
     })
   ).catch((e) => {
-    // Should not happen often, but never let an aggregate failure crash the process.
+    // Never let an aggregate failure crash the process.
     results.push({ ok: false, relay: '(aggregate)', error: String(e?.message ?? e) });
   });
 
   try {
-    pool.close(relays);
+    pool.close(safeRelays);
   } catch {
     // ignore
   }
@@ -103,7 +129,11 @@ export function verifyOrThrow(ev: Event) {
 
 export function subscribeFeed(relays: string[], filters: Filter[], onEvent: (ev: Event, relay: string) => void) {
   const pool = new SimplePool();
-  const sub = pool.subscribeMany(relays, filters[0]!, {
+  const safeRelays = normalizeRelayList(relays);
+
+  // NOTE: nostr-tools typings differ across versions; runtime supports multiple relays.
+  // We subscribe using the first filter for now (our CLI uses one filter). Keep code stable.
+  const sub = pool.subscribeMany(safeRelays, filters[0]!, {
     onevent: (ev: Event) => {
       try {
         if (!verifyEvent(ev)) return;
@@ -120,7 +150,7 @@ export function subscribeFeed(relays: string[], filters: Filter[], onEvent: (ev:
   return {
     close: () => {
       try { sub.close(); } catch {}
-      try { pool.close(relays); } catch {}
+      try { pool.close(safeRelays); } catch {}
     }
   };
 }
